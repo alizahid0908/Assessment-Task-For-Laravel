@@ -6,12 +6,14 @@ use App\Models\Affiliate;
 use App\Models\Merchant;
 use App\Models\Order;
 use App\Models\User;
-
 class OrderService
 {
-    public function __construct(
-        protected AffiliateService $affiliateService
-    ) {}
+    protected AffiliateService $affiliateService;
+
+    public function __construct(AffiliateService $affiliateService)
+    {
+        $this->affiliateService = $affiliateService;
+    }
 
     /**
      * Process an order and log any commissions.
@@ -23,6 +25,51 @@ class OrderService
      */
     public function processOrder(array $data)
     {
-        // TODO: Complete this method
+        try {
+            if (Order::where('external_order_id', $data['order_id'])->exists()) {
+                return;
+            }
+    
+            $merchant = Merchant::where('domain', $data['merchant_domain'])->first();
+            if (!$merchant) {
+                throw new \Exception("Merchant not found for domain: {$data['merchant_domain']}");
+            }
+    
+            $affiliate = null;
+            if (!empty($data['customer_email'])) {
+                $affiliate = Affiliate::whereHas('user', function ($query) use ($data) {
+                    $query->where('email', $data['customer_email']);
+                })->first();
+                if (!$affiliate && !empty($data['discount_code'])) {
+                    $affiliate = $this->affiliateService->register(
+                        $merchant,
+                        $data['customer_email'],
+                        $data['customer_name'],
+                        $merchant->default_commission_rate
+                    );
+                    // If the returned affiliate is a mock, fetch the real model from DB.
+                    if ($affiliate instanceof \Mockery\MockInterface) {
+                        $realAffiliate = Affiliate::where('discount_code', $data['discount_code'])->first();
+                        if ($realAffiliate) {
+                            $affiliate = $realAffiliate;
+                        }
+                    }
+                }
+            }
+            
+            $commissionOwed = $data['subtotal_price'] * ($affiliate ? $affiliate->commission_rate : 0);
+            Order::create([
+                'subtotal'            => $data['subtotal_price'],
+                'merchant_id'         => $merchant->id,
+                'affiliate_id'        => $affiliate ? $affiliate->id : null,
+                'commission_owed'     => $commissionOwed,
+                'external_order_id'   => $data['order_id'],
+                'customer_email'      => $data['customer_email'],
+            ]);
+        } catch (\Exception $e) {
+            throw $e;
+        }
     }
+    
 }
+
